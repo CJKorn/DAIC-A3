@@ -9,6 +9,7 @@ from config import *
 from utils import load_trained_model, load_datasets, get_class_names
 
 def _silence_pgd(attack):
+    print("")
     if isinstance(attack, ProjectedGradientDescent):
         try:
             attack.set_params(verbose=False)
@@ -20,7 +21,7 @@ def _silence_pgd(attack):
 
 def make_classifier(adversarial=False):
     model = load_trained_model(adversarial)
-    return KerasClassifier(model=model, clip_values=(0.0, 1.0), use_logits=False)
+    return KerasClassifier(model=model, clip_values=(0.0, 1.0), use_logits=True)
 
 def evaluate_full_attack(classifier, attack, dataset, batch_limit=ATTACK_BATCH_LIMIT):
     clean_correct = 0
@@ -40,7 +41,7 @@ def evaluate_full_attack(classifier, attack, dataset, batch_limit=ATTACK_BATCH_L
         x = images.numpy()
         y = labels.numpy()
         clean_predictions = np.argmax(classifier.predict(x), axis=1)
-        adversarial_examples = attack.generate(x=x)
+        adversarial_examples = attack.generate(x=x, y=y)
         adversarial_predictions = np.argmax(classifier.predict(adversarial_examples), axis=1)
         total += len(y)
         clean_correct += np.sum(clean_predictions == y)
@@ -60,7 +61,7 @@ def attack_one_image(classifier, attack, dataset, attack_name):
     true_label_int = labels[idx].numpy()
     true_label_text = class_names[true_label_int]
     clean_prediction = np.argmax(classifier.predict(image), axis=1)
-    adversarial_example = attack.generate(x=image)
+    adversarial_example = attack.generate(x=image, y=np.array([true_label_int]))
     adversarial_prediction = np.argmax(classifier.predict(adversarial_example), axis=1)
     adv_img_array = np.clip(adversarial_example[0] * PIXEL_MAX, 0, PIXEL_MAX).astype(np.uint8)
     img = Image.fromarray(adv_img_array)

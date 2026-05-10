@@ -11,17 +11,17 @@ from utils import get_model_path
 from attack import _silence_pgd
 
 def make_model(input_shape, num_classes):
-    data_augmentation = keras.Sequential([
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(0.2),
-        layers.RandomZoom(0.2),
-        layers.RandomContrast(0.2),
-    ], name="data_augmentation")
+    # data_augmentation = keras.Sequential([
+    #     layers.RandomFlip("horizontal"),
+    #     layers.RandomRotation(0.2),
+    #     layers.RandomZoom(0.2),
+    #     layers.RandomContrast(0.2),
+    # ], name="data_augmentation")
     if CUSTOM_MODEL:
         inputs = keras.Input(shape=input_shape)
-        x = data_augmentation(inputs)
+        # x = data_augmentation(inputs)
 
-        x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
+        x = layers.Conv2D(32, 3, padding="same", activation="relu")(inputs)
         x = layers.BatchNormalization()(x)
         x = layers.MaxPooling2D()(x)
 
@@ -38,10 +38,10 @@ def make_model(input_shape, num_classes):
         x = layers.MaxPooling2D()(x)
 
         x = layers.GlobalAveragePooling2D()(x)
-        x = layers.Dropout(0.2)(x)
+        x = layers.Dropout(0.4)(x)
         x = layers.Dense(128, activation="relu")(x)
-        x = layers.Dropout(0.15)(x)
-        outputs = layers.Dense(num_classes, activation="softmax")(x)
+        x = layers.Dropout(0.3)(x)
+        outputs = layers.Dense(num_classes, activation=None)(x)
         return keras.Model(inputs, outputs)
 
     else:
@@ -51,15 +51,19 @@ def make_model(input_shape, num_classes):
             input_shape=input_shape,
         )
         base.trainable = False
+        for layer in base.layers:
+            if isinstance(layer, keras.layers.BatchNormalization):
+                layer.trainable = False
 
         inputs = keras.Input(shape=input_shape)
-        x = data_augmentation(inputs)
+        x = inputs * 255.0
+        # x = data_augmentation(inputs)
         x = base(x)
         x = layers.GlobalAveragePooling2D()(x)
         x = layers.Dropout(0.4)(x)
         x = layers.Dense(512, activation="relu")(x)
         x = layers.Dropout(0.3)(x)
-        outputs = layers.Dense(num_classes, activation="softmax")(x)
+        outputs = layers.Dense(num_classes)(x)
         return keras.Model(inputs, outputs)
 
 class AdversarialValAccuracy(keras.callbacks.Callback): #This also sucks, but it works
@@ -71,7 +75,7 @@ class AdversarialValAccuracy(keras.callbacks.Callback): #This also sucks, but it
 
     def set_model(self, model):
         super().set_model(model)
-        self.classifier = KerasClassifier(model=self.model, clip_values=(0.0, 1.0), use_logits=False)
+        self.classifier = KerasClassifier(model=self.model, clip_values=(0.0, 1.0), use_logits=True)
         self.attack = ProjectedGradientDescent(
             estimator=self.classifier,
             norm=np.inf,
@@ -102,7 +106,7 @@ class AdversarialValAccuracy(keras.callbacks.Callback): #This also sucks, but it
                 continue
             x = images.numpy()
             y = labels.numpy()
-            adv = self.attack.generate(x=x)
+            adv = self.attack.generate(x=x, y=y)
             preds = np.argmax(self.classifier.predict(adv), axis=1)
             correct += np.sum(preds == y)
             total += len(y)
@@ -114,10 +118,12 @@ class AdversarialValAccuracy(keras.callbacks.Callback): #This also sucks, but it
         logs["val_adv_accuracy"] = (correct / total) if total else 0.0
 
 class AdversarialSequence(keras.utils.Sequence): #This sucks
-    def __init__(self, dataset, attack, mix_ratio=0.5):
+    def __init__(self, dataset, attack, mix_ratio=0.5, target_eps=ADV_PGD_EPS, target_step=ADV_PGD_STEP):
         self.dataset = dataset
         self.attack = attack
         self.mix_ratio = mix_ratio
+        self.target_eps = target_eps / PIXEL_MAX
+        self.target_step = target_step / PIXEL_MAX
         self._epoch = 0
         _silence_pgd(self.attack)
         self._cached_batches = []
@@ -127,12 +133,19 @@ class AdversarialSequence(keras.utils.Sequence): #This sucks
             x = images.numpy().astype(np.float32)
             y = labels.numpy().astype(np.int32)
             self._cached_batches.append((x, y))
+        self.augmenter = keras.Sequential([
+            layers.RandomFlip("horizontal"),
+            layers.RandomRotation(0.2),
+            layers.RandomZoom(0.2),
+            layers.RandomContrast(0.2),
+        ])
 
     def __len__(self):
         return len(self._cached_batches)
 
     def __getitem__(self, index):
         x, y = self._cached_batches[index]
+        x = self.augmenter(x, training=True).numpy()
         if self._epoch < WARMUP_EPOCHS:
             return x, y
         batch_size = x.shape[0]
@@ -144,8 +157,11 @@ class AdversarialSequence(keras.utils.Sequence): #This sucks
         adv_count = int(batch_size * effective_mix)
         if adv_count <= 0:
             return x, y
+        current_eps = max(1.0 / PIXEL_MAX, self.target_eps * ramp) 
+        current_step = max(0.5 / PIXEL_MAX, self.target_step * ramp)
+        self.attack.set_params(eps=current_eps, eps_step=current_step)
         adv_idx = np.random.choice(batch_size, adv_count, replace=False)
-        adv = self.attack.generate(x=x[adv_idx])
+        adv = self.attack.generate(x=x[adv_idx], y=y[adv_idx])
         x_mixed = x.copy()
         x_mixed[adv_idx] = adv
         return x_mixed, y
@@ -177,7 +193,7 @@ def train(adversarial=False):
     model = make_model(input_shape=IMAGE_SIZE + (3,), num_classes=NUM_CLASSES)
     model.compile(
         optimizer=keras.optimizers.AdamW(learning_rate=BASE_LR, clipnorm=1.0),
-        loss=keras.losses.SparseCategoricalCrossentropy(),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
     model.summary()
@@ -206,7 +222,7 @@ def train(adversarial=False):
                 monitor="val_adv_accuracy", patience=10, restore_best_weights=True, mode="max", verbose=1, min_delta=0.005
             )
         ]
-        classifier = KerasClassifier(model=model, clip_values=(0.0, 1.0), use_logits=False)
+        classifier = KerasClassifier(model=model, clip_values=(0.0, 1.0), use_logits=True)
         attack = ProjectedGradientDescent(
             estimator=classifier, norm=np.inf, eps=ADV_PGD_EPS / PIXEL_MAX,
             eps_step=ADV_PGD_STEP / PIXEL_MAX, max_iter=ADV_PGD_ITERS, random_eps=False,
@@ -227,7 +243,7 @@ def train(adversarial=False):
         model.trainable = True
         model.compile(
             optimizer=keras.optimizers.AdamW(learning_rate=FINETUNE_LR, clipnorm=1.0),
-            loss=keras.losses.SparseCategoricalCrossentropy(),
+            loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"],
         )
         history = model.fit(

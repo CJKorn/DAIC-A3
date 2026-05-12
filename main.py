@@ -20,20 +20,22 @@ def main():
                 train(adversarial)
             case 'Attack Full':
                 adversarial = adv_or_no("Pick model to attack")
+                shields = Shields()
                 option, index = pick(['FGSM', 'PGD'], "Pick an attack method")
                 match option:
                     case 'FGSM':
-                        FGSM(True, adversarial)
+                        FGSM(True, adversarial, shields=shields)
                     case 'PGD':
-                        PGD(True, adversarial)
+                        PGD(True, adversarial, shields=shields)
             case 'Attack One':
                 adversarial = adv_or_no("Pick model to attack")
+                shields = Shields()
                 option, index = pick(['FGSM', 'PGD'], "Pick an attack method")
                 match option:
                     case 'FGSM':
-                        FGSM(False, adversarial)
+                        FGSM(False, adversarial, shields=shields)
                     case 'PGD':
-                        PGD(False, adversarial)
+                        PGD(False, adversarial, shields=shields)
             case 'Test':
                 adversarial = adv_or_no("Pick model to test")
                 shields = Shields()

@@ -79,21 +79,24 @@ def jpeg_compress(x: np.ndarray):
         return np.stack([_compress_one(img) for img in x])
     return _compress_one(x)
 
-
-def apply_defences(image_batch: np.ndarray):
-    x = feature_squeeze(image_batch)
-    x = jpeg_compress(x)
+def manipulate_images(image_batch: np.ndarray):
+    x = image_batch
+    # x = feature_squeeze(image_batch)
+    # x = jpeg_compress(x)
     return x
+
+def add_random_noise(model: keras.Model, x: np.ndarray):
+    probs_rs = randomised_smoothing(model, x)
+    # probs_wn = noisy_weights(model, x)
+    return (probs_rs) / 1.0
 
 def _predict_probs(model: keras.Model, image_uint8: np.ndarray, shields: bool):
     x = (image_uint8.astype(np.float32) / PIXEL_MAX)[None, ...]
     if not shields:
         return softmax(model.predict(x, verbose=0)[0]).astype(np.float32)
-    x = apply_defences(x)
-    # probs_rs = randomised_smoothing(model, x)
-    probs_wn = noisy_weights(model, x)
-    return ((probs_wn) / 1.0).astype(np.float32)
-
+    x = manipulate_images(x)
+    probs = add_random_noise(model, x)
+    return probs[0].astype(np.float32)
 
 def softmax(logits: np.ndarray):
     shifted = logits - np.max(logits, axis=-1, keepdims=True)
@@ -106,12 +109,13 @@ def randomised_smoothing(model: keras.Model, image_batch: np.ndarray):
     x_noisy = np.clip(x_tiled + noise, 0.0, 1.0)
     logits = model.predict(x_noisy, verbose=0)
     probs = softmax(logits)
-    return probs.mean(axis=0)
+    probs = probs.reshape(-1, RS_N_SAMPLES, probs.shape[-1])
+    return probs.mean(axis=1)
 
 def noisy_weights(model: keras.Model, x: np.ndarray):
-    probs_sum = np.zeros(NUM_CLASSES, dtype=np.float32)
-    x_tensor  = tf.constant(x)
+    x_tensor = tf.constant(x)
     original_weights = [layer.get_weights() for layer in model.layers]
+    probs_sum = 0
     for _ in range(WN_N_PASSES):
         for layer, orig_ws in zip(model.layers, original_weights):
             if not orig_ws:
@@ -122,7 +126,7 @@ def noisy_weights(model: keras.Model, x: np.ndarray):
                 noise = np.random.normal(0, WN_STD * layer_std, w.shape).astype(w.dtype)
                 noisy.append(w + noise)
             layer.set_weights(noisy)
-        logits = model(x_tensor, training=False).numpy()[0]
+        logits = model(x_tensor, training=False).numpy()
         probs_sum += softmax(logits)
     for layer, orig_ws in zip(model.layers, original_weights):
         if orig_ws:

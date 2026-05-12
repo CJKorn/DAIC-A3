@@ -6,7 +6,7 @@ from art.estimators.classification import KerasClassifier
 from art.attacks.evasion import FastGradientMethod, ProjectedGradientDescent
 
 from config import *
-from utils import load_trained_model, load_datasets, get_class_names
+from utils import load_trained_model, load_datasets, get_class_names, manipulate_images, add_random_noise
 
 def _silence_pgd(attack):
     print("")
@@ -23,7 +23,7 @@ def make_classifier(adversarial=False):
     model = load_trained_model(adversarial)
     return KerasClassifier(model=model, clip_values=(0.0, 1.0), use_logits=True)
 
-def evaluate_full_attack(classifier, attack, dataset, batch_limit=ATTACK_BATCH_LIMIT):
+def evaluate_full_attack(classifier, attack, dataset, batch_limit=ATTACK_BATCH_LIMIT, shields=False):
     clean_correct = 0
     adversarial_correct = 0
     total = 0
@@ -35,24 +35,40 @@ def evaluate_full_attack(classifier, attack, dataset, batch_limit=ATTACK_BATCH_L
         data_iter = tqdm(dataset, total=total_batches, desc="PGD batches", leave=False)
     else:
         data_iter = dataset
+        
     for batch_index, (images, labels) in enumerate(data_iter):
         if batch_limit is not None and batch_index >= batch_limit:
             break
         x = images.numpy()
         y = labels.numpy()
-        clean_predictions = np.argmax(classifier.predict(x), axis=1)
+        
+        if shields:
+            x_manipulated = manipulate_images(x)
+            clean_probs = add_random_noise(classifier.model, x_manipulated)
+            clean_predictions = np.argmax(clean_probs, axis=1)
+        else:
+            clean_predictions = np.argmax(classifier.predict(x), axis=1)
+        
         adversarial_examples = attack.generate(x=x, y=y)
-        adversarial_predictions = np.argmax(classifier.predict(adversarial_examples), axis=1)
+        
+        if shields:
+            adv_manipulated = manipulate_images(adversarial_examples)
+            adv_probs = add_random_noise(classifier.model, adv_manipulated)
+            adversarial_predictions = np.argmax(adv_probs, axis=1)
+        else:
+            adversarial_predictions = np.argmax(classifier.predict(adversarial_examples), axis=1)
+        
         total += len(y)
         clean_correct += np.sum(clean_predictions == y)
         adversarial_correct += np.sum(adversarial_predictions == y)
+        
     clean_accuracy = clean_correct / total
     adversarial_accuracy = adversarial_correct / total
 
     print(f"Clean accuracy: {clean_accuracy:.4f}")
     print(f"Adversarial accuracy: {adversarial_accuracy:.4f}")
 
-def attack_one_image(classifier, attack, dataset, attack_name):
+def attack_one_image(classifier, attack, dataset, attack_name, shields=False):
     class_names = get_class_names()
     batch_idx = np.random.randint(0, len(dataset))
     images, labels = next(iter(dataset.skip(batch_idx).take(1)))
@@ -60,9 +76,23 @@ def attack_one_image(classifier, attack, dataset, attack_name):
     image = images[idx:idx+1].numpy()
     true_label_int = labels[idx].numpy()
     true_label_text = class_names[true_label_int]
-    clean_prediction = np.argmax(classifier.predict(image), axis=1)
+    
+    if shields:
+        img_manipulated = manipulate_images(image)
+        clean_probs = add_random_noise(classifier.model, img_manipulated)
+        clean_prediction = np.argmax(clean_probs, axis=1)
+    else:
+        clean_prediction = np.argmax(classifier.predict(image), axis=1)
+    
     adversarial_example = attack.generate(x=image, y=np.array([true_label_int]))
-    adversarial_prediction = np.argmax(classifier.predict(adversarial_example), axis=1)
+    
+    if shields:
+        adv_manipulated = manipulate_images(adversarial_example)
+        adv_probs = add_random_noise(classifier.model, adv_manipulated)
+        adversarial_prediction = np.argmax(adv_probs, axis=1)
+    else:
+        adversarial_prediction = np.argmax(classifier.predict(adversarial_example), axis=1)
+    
     adv_img_array = np.clip(adversarial_example[0] * PIXEL_MAX, 0, PIXEL_MAX).astype(np.uint8)
     img = Image.fromarray(adv_img_array)
     filename = f"{attack_name}-{true_label_text}-{batch_idx}.png"
@@ -72,16 +102,16 @@ def attack_one_image(classifier, attack, dataset, attack_name):
     print(f"Original prediction = {clean_prediction}")
     print(f"Adversarial Prediction = {adversarial_prediction}")
 
-def FGSM(full, adversarial=False):
+def FGSM(full, adversarial=False, shields=False):
     classifier = make_classifier(adversarial)
     _, val_ds = load_datasets()
     attack = FastGradientMethod(estimator=classifier, norm=np.inf, eps=ADV_PGD_EPS / PIXEL_MAX)
     if full:
-        evaluate_full_attack(classifier, attack, val_ds)
+        evaluate_full_attack(classifier, attack, val_ds, shields=shields)
     else:
-        attack_one_image(classifier, attack, val_ds, "FGSM")
+        attack_one_image(classifier, attack, val_ds, "FGSM", shields=shields)
 
-def PGD(full, adversarial=False):
+def PGD(full, adversarial=False, shields=False):
     classifier = make_classifier(adversarial)
     _, val_ds = load_datasets()
     attack = ProjectedGradientDescent(
@@ -93,9 +123,9 @@ def PGD(full, adversarial=False):
         random_eps=False,
     )
     if full:
-        evaluate_full_attack(classifier, attack, val_ds)
+        evaluate_full_attack(classifier, attack, val_ds, shields=shields)
     else:
-        attack_one_image(classifier, attack, val_ds, "PGD")
+        attack_one_image(classifier, attack, val_ds, "PGD", shields=shields)
 
 def Defence():
     print("Defence")

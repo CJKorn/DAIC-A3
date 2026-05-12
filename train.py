@@ -18,11 +18,15 @@ def make_model(input_shape, num_classes):
     #     layers.RandomZoom(0.2),
     #     layers.RandomContrast(0.2),
     # ], name="data_augmentation")
-    if CUSTOM_MODEL:
-        inputs = keras.Input(shape=input_shape)
-        # x = data_augmentation(inputs)
+    inputs = keras.Input(shape=input_shape)
+    x = inputs
+    if NOISE_AWARE_TRAINING:
+        x = layers.GaussianNoise(RS_NOISE_STD)(x)
 
-        x = layers.Conv2D(32, 3, padding="same", activation="relu")(inputs)
+    if CUSTOM_MODEL:
+        # x = data_augmentation(x)
+
+        x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
         x = layers.BatchNormalization()(x)
         x = layers.MaxPooling2D()(x)
 
@@ -55,10 +59,8 @@ def make_model(input_shape, num_classes):
         # for layer in base.layers:
         #     if isinstance(layer, keras.layers.BatchNormalization):
         #         layer.trainable = False
-
-        inputs = keras.Input(shape=input_shape)
-        x = inputs * 255.0
-        # x = data_augmentation(inputs)
+        x = x * 255.0
+        # x = data_augmentation(x)
         x = base(x)
         x = layers.GlobalAveragePooling2D()(x)
         x = layers.Dropout(0.4)(x)
@@ -246,18 +248,22 @@ def train(adversarial=False):
         )
         _silence_pgd(attack)
         train_data = AdversarialSequence(train_ds, attack, mix_ratio=ADV_MIX_RATIO)
+        callbacks = finetune_callbacks
     else:
+        finetune_callbacks = warmup_callbacks
         callbacks = warmup_callbacks
         train_data = train_ds.prefetch(tf.data.AUTOTUNE)
     if not CUSTOM_MODEL:
-        if WARMUP_EPOCHS > 0:
+        did_warmup = False
+        if adversarial and WARMUP_EPOCHS > 0:
             print(f"\nWarming up for {WARMUP_EPOCHS} epochs")
             model.fit(
-                train_data, 
-                validation_data=val_ds, 
-                epochs=WARMUP_EPOCHS, 
-                callbacks=warmup_callbacks
+                train_data,
+                validation_data=val_ds,
+                epochs=WARMUP_EPOCHS,
+                callbacks=warmup_callbacks,
             )
+            did_warmup = True
         
         print(f"Unfreezing backbone...")
         model.trainable = True
@@ -274,12 +280,13 @@ def train(adversarial=False):
             metrics=["accuracy"],
         )
         
+        start_epoch = WARMUP_EPOCHS if did_warmup else 0
         history = model.fit(
-            train_data, 
-            validation_data=val_ds, 
-            epochs=EPOCHS, 
-            initial_epoch=WARMUP_EPOCHS,
-            callbacks=finetune_callbacks
+            train_data,
+            validation_data=val_ds,
+            epochs=EPOCHS,
+            initial_epoch=start_epoch,
+            callbacks=finetune_callbacks,
         )
     else:
         history = model.fit(train_data, validation_data=val_ds, epochs=EPOCHS, callbacks=callbacks)

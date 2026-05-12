@@ -6,7 +6,6 @@ env/
 *.zip
 *.7z
 images/*
-*.keras
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -36,7 +36,8 @@ def main():
                         PGD(False, adversarial)
             case 'Test':
                 adversarial = adv_or_no("Pick model to test")
-                Test(adversarial=adversarial)
+                shields = Shields()
+                Test(adversarial=adversarial, shields=shields)
             case _:
                 print("Literally how did you get here")
                 return
@@ -45,6 +46,10 @@ def main():
 def adv_or_no(prompt):
     option, _ = pick(["Normal", "Adversarially trained"], prompt)
     return option == "Adversarially trained"
+
+def Shields():
+    option, _ = pick(["No", "Yes"], "Divert power to shields?")
+    return option == "Yes"
 
 def Test(shields: bool | None = None, adversarial=False):
     image_files = sorted(

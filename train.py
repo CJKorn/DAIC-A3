@@ -4,6 +4,7 @@ import numpy as np
 from keras import layers
 from art.estimators.classification import KerasClassifier
 from art.attacks.evasion import ProjectedGradientDescent
+from art.attacks.evasion import FastGradientMethod
 from tqdm import tqdm
 
 from config import * #technically not supposed to do this, practially still am :)
@@ -51,9 +52,9 @@ def make_model(input_shape, num_classes):
             input_shape=input_shape,
         )
         base.trainable = False
-        for layer in base.layers:
-            if isinstance(layer, keras.layers.BatchNormalization):
-                layer.trainable = False
+        # for layer in base.layers:
+        #     if isinstance(layer, keras.layers.BatchNormalization):
+        #         layer.trainable = False
 
         inputs = keras.Input(shape=input_shape)
         x = inputs * 255.0
@@ -84,6 +85,12 @@ class AdversarialValAccuracy(keras.callbacks.Callback): #This also sucks, but it
             max_iter=ADV_PGD_ITERS,
             random_eps=False,
         )
+        _silence_pgd(self.attack)
+        # self.attack = FastGradientMethod(
+        #     estimator=self.classifier,
+        #     norm=np.inf,
+        #     eps=ADV_PGD_EPS / PIXEL_MAX,
+        # )
         _silence_pgd(self.attack)
 
     def on_epoch_end(self, epoch, logs=None):
@@ -197,7 +204,7 @@ def train(adversarial=False):
         metrics=["accuracy"],
     )
     model.summary()
-    callbacks = [
+    warmup_callbacks = [
         keras.callbacks.ReduceLROnPlateau(
             monitor="val_accuracy",
             factor=0.5,
@@ -213,13 +220,23 @@ def train(adversarial=False):
         )
     ]
     if adversarial:
-        callbacks = [
+        finetune_callbacks = [
             AdversarialValAccuracy(val_ds),
             keras.callbacks.ReduceLROnPlateau(
-                monitor="val_adv_accuracy", factor=0.6, patience=5, min_lr=1e-7, mode="max", verbose=1
+                monitor="val_adv_accuracy",
+                factor=0.6,
+                patience=5,
+                min_lr=1e-7,
+                mode="max",
+                verbose=1
             ),
             keras.callbacks.EarlyStopping(
-                monitor="val_adv_accuracy", patience=10, restore_best_weights=True, mode="max", verbose=1, min_delta=0.005
+                monitor="val_adv_accuracy",
+                patience=10,
+                restore_best_weights=True,
+                mode="max",
+                verbose=1,
+                min_delta=0.005
             )
         ]
         classifier = KerasClassifier(model=model, clip_values=(0.0, 1.0), use_logits=True)
@@ -230,28 +247,39 @@ def train(adversarial=False):
         _silence_pgd(attack)
         train_data = AdversarialSequence(train_ds, attack, mix_ratio=ADV_MIX_RATIO)
     else:
+        callbacks = warmup_callbacks
         train_data = train_ds.prefetch(tf.data.AUTOTUNE)
-    if not CUSTOM_MODEL and WARMUP_EPOCHS > 0:
-        print(f"\nWarming up for {WARMUP_EPOCHS} epochs")
-        model.fit(
-            train_data, 
-            validation_data=val_ds, 
-            epochs=WARMUP_EPOCHS, 
-            callbacks=callbacks
-        )
-        print(f"Unfreezing")
+    if not CUSTOM_MODEL:
+        if WARMUP_EPOCHS > 0:
+            print(f"\nWarming up for {WARMUP_EPOCHS} epochs")
+            model.fit(
+                train_data, 
+                validation_data=val_ds, 
+                epochs=WARMUP_EPOCHS, 
+                callbacks=warmup_callbacks
+            )
+        
+        print(f"Unfreezing backbone...")
         model.trainable = True
+        
+        for layer in model.layers:
+            if isinstance(layer, keras.Model): 
+                for sublayer in layer.layers:
+                    if isinstance(sublayer, keras.layers.BatchNormalization):
+                        sublayer.trainable = False
+
         model.compile(
             optimizer=keras.optimizers.AdamW(learning_rate=FINETUNE_LR, clipnorm=1.0),
             loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
             metrics=["accuracy"],
         )
+        
         history = model.fit(
             train_data, 
             validation_data=val_ds, 
             epochs=EPOCHS, 
             initial_epoch=WARMUP_EPOCHS,
-            callbacks=callbacks
+            callbacks=finetune_callbacks
         )
     else:
         history = model.fit(train_data, validation_data=val_ds, epochs=EPOCHS, callbacks=callbacks)
